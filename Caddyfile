@@ -20,9 +20,9 @@ notification.utkarsh.cloudns.asia {
     # Enable compression
     encode gzip zstd
 
-    # Logging
+    # Logging to stdout (journald will capture it)
     log {
-        output file /var/log/caddy/knottifire-access.log
+        output stdout
         format json
     }
 

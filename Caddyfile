@@ -1,0 +1,47 @@
+# Knottifire Backend HTTPS Configuration with Let's Encrypt
+# Domain: notification.utkarsh.cloudns.asia
+# Email: utkarshvishnoi25@gmail.com
+
+notification.utkarsh.cloudns.asia {
+    # Email for Let's Encrypt certificate notifications
+    tls utkarshvishnoi25@gmail.com
+
+    # Reverse proxy to local FastAPI application
+    reverse_proxy 127.0.0.1:8000 {
+        # Health check
+        health_uri /health
+        health_interval 30s
+        health_timeout 5s
+
+        # Forward real client IP
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Enable compression
+    encode gzip zstd
+
+    # Logging
+    log {
+        output file /var/log/caddy/knottifire-access.log
+        format json
+    }
+
+    # Security headers
+    header {
+        # Enable HSTS
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Prevent clickjacking
+        X-Frame-Options "DENY"
+        # Prevent MIME sniffing
+        X-Content-Type-Options "nosniff"
+        # Remove server header
+        -Server
+    }
+}
+
+# Optional: Redirect www to non-www (if you add www subdomain)
+# www.notification.utkarsh.cloudns.asia {
+#     redir https://notification.utkarsh.cloudns.asia{uri} permanent
+# }

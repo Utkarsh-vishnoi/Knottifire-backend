@@ -1,0 +1,27 @@
+[Unit]
+Description=Knottifire Notification Backend
+After=network.target
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/knottifire
+Environment="PATH=/opt/knottifire/venv/bin"
+EnvironmentFile=/opt/knottifire/.env
+ExecStart=/opt/knottifire/venv/bin/gunicorn app.main:app \
+    -w 4 \
+    -k uvicorn.workers.UvicornWorker \
+    --bind 127.0.0.1:8000 \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level info
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

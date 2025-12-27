@@ -15,8 +15,6 @@ notification.utkarsh.cloudns.asia {
 
         # Forward real client IP
         header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
     }
 
     # Enable compression
@@ -42,6 +40,6 @@ notification.utkarsh.cloudns.asia {
 }
 
 # Optional: Redirect www to non-www (if you add www subdomain)
-# www.notification.utkarsh.cloudns.asia {
-#     redir https://notification.utkarsh.cloudns.asia{uri} permanent
-# }
+www.notification.utkarsh.cloudns.asia {
+    redir https://notification.utkarsh.cloudns.asia{uri} permanent
+}

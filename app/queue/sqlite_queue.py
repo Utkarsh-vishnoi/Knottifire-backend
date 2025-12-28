@@ -92,6 +92,45 @@ class SQLiteQueue(NotificationQueue):
                 # Column already exists
                 pass
 
+            # Device registry table for multi-device support
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id TEXT UNIQUE NOT NULL,
+                    fcm_token TEXT NOT NULL,
+                    device_name TEXT,
+                    android_version INTEGER,
+                    app_version TEXT,
+                    last_seen REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    active BOOLEAN DEFAULT 1
+                )
+            """)
+
+            # Index for querying active devices
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_device_active
+                ON devices(active, last_seen)
+            """)
+
+            # Per-device acknowledgment tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notification_acks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    ack_timestamp REAL NOT NULL,
+                    device_timestamp TEXT NOT NULL,
+                    UNIQUE(message_id, device_id)
+                )
+            """)
+
+            # Index for efficient ACK lookups
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ack_lookup
+                ON notification_acks(message_id)
+            """)
+
             conn.commit()
             logger.info("Database schema initialized")
         finally:
@@ -292,6 +331,151 @@ class SQLiteQueue(NotificationQueue):
                 "oldest_message_age_seconds": oldest_age,
                 "dead_letter_count": dead_letter_count,
             }
+        finally:
+            conn.close()
+
+    def register_device(
+        self,
+        device_id: str,
+        fcm_token: str,
+        device_name: Optional[str] = None,
+        android_version: Optional[int] = None,
+        app_version: Optional[str] = None,
+    ) -> bool:
+        """
+        Register or update a device in the device registry.
+        Updates FCM token and last_seen if device already exists.
+        """
+        conn = self._get_connection()
+        try:
+            now = time.time()
+            # Try to update existing device first
+            result = conn.execute(
+                """
+                UPDATE devices
+                SET fcm_token = ?, device_name = ?, android_version = ?,
+                    app_version = ?, last_seen = ?, active = 1
+                WHERE device_id = ?
+                """,
+                (fcm_token, device_name, android_version, app_version, now, device_id),
+            )
+
+            if result.rowcount == 0:
+                # Device doesn't exist, insert new
+                conn.execute(
+                    """
+                    INSERT INTO devices (device_id, fcm_token, device_name,
+                                       android_version, app_version, last_seen,
+                                       created_at, active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (device_id, fcm_token, device_name, android_version,
+                     app_version, now, now),
+                )
+                logger.info(f"Registered new device: {device_id}")
+            else:
+                logger.info(f"Updated existing device: {device_id}")
+
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to register device {device_id}: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def get_active_devices(self) -> List[Dict[str, Any]]:
+        """Get list of all active devices with their FCM tokens."""
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT device_id, fcm_token, device_name
+                FROM devices
+                WHERE active = 1
+                ORDER BY last_seen DESC
+                """
+            ).fetchall()
+
+            return [{"device_id": row["device_id"],
+                    "fcm_token": row["fcm_token"],
+                    "device_name": row["device_name"]} for row in rows]
+        finally:
+            conn.close()
+
+    def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Get device information by device_id."""
+        conn = self._get_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT device_id, fcm_token, device_name, android_version,
+                       app_version, last_seen, created_at, active
+                FROM devices
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+
+            if row:
+                return dict(row)
+            return None
+        finally:
+            conn.close()
+
+    def insert_ack(
+        self, message_id: str, device_id: str, device_timestamp: str
+    ) -> bool:
+        """Record an acknowledgment from a specific device for a message."""
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO notification_acks
+                (message_id, device_id, ack_timestamp, device_timestamp)
+                VALUES (?, ?, ?, ?)
+                """,
+                (message_id, device_id, time.time(), device_timestamp),
+            )
+            conn.commit()
+            logger.info(f"Recorded ACK for message {message_id} from device {device_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to insert ACK: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def count_acks_for_message(self, message_id: str) -> int:
+        """Count how many devices have acknowledged a specific message."""
+        conn = self._get_connection()
+        try:
+            result = conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM notification_acks
+                WHERE message_id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            return result["count"]
+        finally:
+            conn.close()
+
+    def count_active_devices(self) -> int:
+        """Count total number of active devices."""
+        conn = self._get_connection()
+        try:
+            result = conn.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM devices
+                WHERE active = 1
+                """
+            ).fetchone()
+            return result["count"]
         finally:
             conn.close()
 

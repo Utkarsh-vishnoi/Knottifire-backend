@@ -36,24 +36,57 @@ async def acknowledge_delivery(
     """
     Receive acknowledgment from Android that notification was delivered.
 
-    - Removes message from queue
-    - Returns 404 if message not found (already ACK'd or expired)
+    Multi-device strategy:
+    - Records ACK for this specific device
+    - Removes message from queue ONLY when ALL active devices have acknowledged
+    - Returns 404 if device not registered
     - Idempotent (safe to retry)
     """
     logger.info(
-        f"Received ACK for message {ack.message_id} at device time {ack.device_timestamp}",
-        extra={"message_id": ack.message_id}
+        f"Received ACK for message {ack.message_id} from device {ack.device_id} at {ack.device_timestamp}",
+        extra={"message_id": ack.message_id, "device_id": ack.device_id}
     )
 
-    # Remove from queue
-    removed = queue.acknowledge(ack.message_id)
-
-    if not removed:
-        logger.warning(f"ACK for {ack.message_id} but message not in queue")
+    # Verify device is registered
+    device = queue.get_device(ack.device_id)
+    if not device:
+        logger.warning(f"ACK from unregistered device: {ack.device_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Message not found in queue",
+            detail="Device not registered. Please register device first.",
         )
+
+    # Record ACK for this device
+    ack_recorded = queue.insert_ack(ack.message_id, ack.device_id, ack.device_timestamp)
+    if not ack_recorded:
+        logger.error(f"Failed to record ACK for {ack.message_id} from {ack.device_id}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record acknowledgment",
+        )
+
+    # Check if ALL active devices have acknowledged
+    active_device_count = queue.count_active_devices()
+    ack_count = queue.count_acks_for_message(ack.message_id)
+
+    logger.info(
+        f"Message {ack.message_id}: {ack_count}/{active_device_count} devices acknowledged",
+        extra={"message_id": ack.message_id, "ack_count": ack_count, "total_devices": active_device_count}
+    )
+
+    if ack_count >= active_device_count:
+        # All devices have acknowledged - remove from queue
+        removed = queue.acknowledge(ack.message_id)
+        if removed:
+            logger.info(
+                f"All devices acknowledged - removed {ack.message_id} from queue",
+                extra={"message_id": ack.message_id}
+            )
+        else:
+            logger.warning(
+                f"All devices ACK'd but message {ack.message_id} not in queue (already removed or expired)",
+                extra={"message_id": ack.message_id}
+            )
 
     return AckResponse(
         status="acknowledged",

@@ -12,7 +12,7 @@ from app.core.config import config
 from app.core.logging import setup_logging, get_logger
 from app.queue.sqlite_queue import SQLiteQueue
 from app.queue.worker import NotificationWorker, set_worker
-from app.api import webhook, ack, health
+from app.api import webhook, ack, health, devices
 
 
 # Setup logging
@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     webhook.set_queue(queue)
     ack.set_queue(queue)
     health.set_queue(queue)
+    devices.set_queue(queue)
 
     # Initialize and start worker
     worker = NotificationWorker(queue)
@@ -87,6 +88,7 @@ app = FastAPI(
 app.include_router(webhook.router, tags=["webhook"])
 app.include_router(ack.router, tags=["ack"])
 app.include_router(health.router, tags=["health"])
+app.include_router(devices.router, tags=["devices"])
 
 
 @app.get("/")
@@ -99,6 +101,7 @@ async def root():
             "webhook": "POST /webhook",
             "ack": "POST /ack",
             "health": "GET /health",
+            "devices": "POST /devices/register",
             "docs": "GET /docs",
         },
     }

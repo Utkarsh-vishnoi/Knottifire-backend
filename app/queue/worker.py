@@ -58,7 +58,7 @@ class NotificationWorker:
     async def _process_message(self, msg: QueueMessage) -> None:
         """
         Process a single message.
-        Checks TTL, sends to FCM, updates retry state.
+        Checks TTL, sends to FCM (all devices), updates retry state.
         """
         # Check if expired
         if msg.is_expired:
@@ -75,12 +75,38 @@ class NotificationWorker:
             self.queue.move_to_dead_letter(msg.message_id, f"Max retries ({retry_config['max_retries']}) exceeded")
             return
 
-        # Attempt FCM send
-        success, error = await self._send_to_fcm(msg)
+        # Get all active devices
+        devices = self.queue.get_active_devices()
 
-        if success:
-            logger.info(f"Successfully sent {msg.message_id} to FCM (attempt {msg.retry_count + 1})")
-            # Message stays in queue until ACK received from Android
+        # Backward compatibility: fallback to env var if no devices registered
+        if not devices:
+            if config.FCM_DEVICE_TOKEN:
+                logger.info("No devices in registry, using FCM_DEVICE_TOKEN from environment")
+                devices = [{"device_id": "legacy", "fcm_token": config.FCM_DEVICE_TOKEN, "device_name": "Legacy Device"}]
+            else:
+                logger.error(f"No devices registered and no FCM_DEVICE_TOKEN configured - cannot send {msg.message_id}")
+                self.queue.move_to_dead_letter(msg.message_id, "No devices available")
+                return
+
+        # Attempt FCM send to all devices
+        all_success = True
+        errors = []
+
+        for device in devices:
+            success, error = await self._send_to_fcm(msg, device["fcm_token"], device["device_id"])
+            if success:
+                logger.info(
+                    f"Successfully sent {msg.message_id} to device {device['device_id']} "
+                    f"({device.get('device_name', 'Unknown')}) (attempt {msg.retry_count + 1})"
+                )
+            else:
+                all_success = False
+                errors.append(f"{device['device_id']}: {error}")
+                logger.warning(f"Failed to send {msg.message_id} to device {device['device_id']}: {error}")
+
+        if all_success:
+            logger.info(f"Successfully sent {msg.message_id} to all {len(devices)} device(s)")
+            # Message stays in queue until ACK received from all Android devices
         else:
             # Update retry state with exponential backoff
             new_retry_count = msg.retry_count + 1
@@ -88,21 +114,22 @@ class NotificationWorker:
             backoff_delay = base_delay * (2 ** min(msg.retry_count, 8))  # Cap at 2^8 multiplier
             next_retry = time.time() + backoff_delay
 
+            combined_error = "; ".join(errors)
             self.queue.update_retry(
                 message_id=msg.message_id,
                 retry_count=new_retry_count,
                 next_retry_at=next_retry,
-                last_error=error,
+                last_error=combined_error,
             )
 
             logger.warning(
-                f"Failed to send {msg.message_id} (attempt {new_retry_count}), "
-                f"retrying in {backoff_delay}s: {error}"
+                f"Failed to send {msg.message_id} to some devices (attempt {new_retry_count}), "
+                f"retrying in {backoff_delay}s: {combined_error}"
             )
 
-    async def _send_to_fcm(self, msg: QueueMessage) -> tuple[bool, Optional[str]]:
+    async def _send_to_fcm(self, msg: QueueMessage, fcm_token: str, device_id: str) -> tuple[bool, Optional[str]]:
         """
-        Send message to FCM.
+        Send message to FCM for a specific device.
         Returns (success, error_message).
         """
         try:
@@ -123,7 +150,7 @@ class NotificationWorker:
                     "source": payload_data["source"],
                     "timestamp": payload_data["timestamp"],
                 },
-                token=msg.fcm_token,
+                token=fcm_token,
                 android=messaging.AndroidConfig(
                     priority="high",  # Bypass Doze mode
                     ttl=msg.ttl_seconds,
@@ -132,19 +159,19 @@ class NotificationWorker:
 
             # Send to FCM (this is sync, but fast)
             response = await asyncio.to_thread(messaging.send, fcm_message)
-            logger.info(f"FCM send response for {msg.message_id}: {response}")
+            logger.info(f"FCM send response for {msg.message_id} to device {device_id}: {response}")
 
             return True, None
 
         except messaging.UnregisteredError:
             # FCM token invalid/expired
             error = "FCM token unregistered or expired"
-            logger.error(f"FCM token error for {msg.message_id}: {error}")
+            logger.error(f"FCM token error for {msg.message_id} device {device_id}: {error}")
             return False, error
 
         except Exception as e:
             error = str(e)
-            logger.error(f"FCM send error for {msg.message_id}: {error}", exc_info=True)
+            logger.error(f"FCM send error for {msg.message_id} device {device_id}: {error}", exc_info=True)
             return False, error
 
     def is_alive(self) -> bool:
